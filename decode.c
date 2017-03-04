@@ -30,6 +30,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <time.h>
 #include "xmalloc.h"
 #include "common.h"
 #include "part.h"
@@ -132,9 +133,14 @@ int handleMessage(struct part *inpart, char *defaultContentType, int inAppleDoub
 	     !strncasecmp(contentType, "text/", 5) &&
 	     !getDispositionFilename(contentDisposition) &&
 	     !getParam(contentParams, "name")) {
+    return ignoreMessage(inpart);
 	return handleText(inpart, contentEncoding);
     }
     else {
+		if (!contentDisposition || strncasecmp(contentDisposition, "attachment", 10)) {
+            return ignoreMessage(inpart);
+        }
+
 	/* Some sort of attachment, extract it */
 	return saveToFile(inpart, inAppleDouble, contentType, contentParams,
 			  contentEncoding, contentDisposition, contentMD5);
@@ -194,6 +200,85 @@ void SkipWhitespace(char **s)
 	*s = p;
     }
 }
+
+
+
+
+
+static char from_name[256] = "\0";
+static char from_email[256] = "\0";
+
+static char to_name[256] = "\0";
+static char to_email[256] = "\0";
+
+static char mail_subject[4096] = "\0";
+
+static time_t mail_date = 0;
+
+extern char* rfc2047_decode(char *pd);
+
+
+static void  ParseMailAddress(char *data, char *name, char *mail) {
+
+
+    /*
+       case 0:
+           if (*data == '\"')
+               step = 1;
+           break;
+       case 1:
+           if (*data == '\"') {
+               step = 2;
+               char *tmp = rfc2047_decode(name);
+               strncpy(name, tmp, 255);
+               free(tmp);
+           }
+           else if (c < 255) {
+               name[c++] = *data;
+           }
+     */
+
+
+    char *p = data;
+    int step = 0;
+    int c = 0;
+    while (p && *p && *p != '\n') {
+        switch (step)
+        {
+
+        case 0:
+            if (*p == '<') {
+                step = 1;
+                c = 0;
+            }
+            break;
+        case 1:
+            if (*p == '>') {
+                mail[c] = 0;
+                return;
+            }
+            else if (c < 255) {
+                mail[c++] = *p;
+            }
+        default:
+            break;
+        }
+        ++p;
+    }
+
+    c = 0;
+    p = data;
+    while (p && *p && *p != '\n') {
+        if(c<255 && (isalpha(*p) || *p == '@' || *p =='.' || *p == '-'))
+            mail[c++] = *p;
+        ++p;
+    }
+
+    mail[c] = 0;
+}
+
+
+
 
 /*
  * Read and parse the headers of an RFC 822 message, returning them in
@@ -262,12 +347,81 @@ char *ParseHeaders(struct part *inpart, char **subjectp, char **contentTypep, en
     for (next = headers; *next; next++) {
 	if (*next == '\n') {
 	    switch(next[1]) {
+
+		//From: "=?gb18030?B?tqa2pg==?=" <cdevelop@qq.com>
+		//To: "=?gb18030?B?aXlhb3Nhbg==?=" <iyaosan@126.com>
+
+        case 'F':
+        case 'f':
+        if (!strncasecmp(next + 2, "rom:", 4)) {
+            val = next + 6;
+            SkipWhitespace(&val);
+            if (val)
+                ParseMailAddress(val, from_name, from_email);
+        }
+        break;
+
+        case 'T':
+        case 't':
+        if (!strncasecmp(next + 2, "o:", 2)) {
+            val = next + 4;
+            SkipWhitespace(&val);
+            if (val) 
+                ParseMailAddress(val, to_name, to_email);
+
+        }
+        break;
+
+        case 'D':
+        case 'd':
+            if (!strncasecmp(next + 2, "ate:", 4)) {
+                val = next + 6;
+                char *p = val;
+                char date[256] = "\0";
+                int c = 0;
+                while (*p && *p != '\n') {
+					if(c==0) {
+						if(*p==' '){
+							++p;
+							continue;
+						}
+					}
+
+					if(c<255)
+						date[c++] = *p++;
+					else
+						break;
+					
+                }
+
+				 struct tm tm = {0};
+				 char *x= strptime(date,"%a, %d %b %Y %T %z",&tm); 
+				 mail_date = mktime(&tm);
+
+            }
+            break;
+
 	    case 's':
 	    case 'S':
 		if (!strncasecmp(next+2, "ubject:", 7)) {
 		    val = next+9;
 		    SkipWhitespace(&val);
-		    if (val) *subjectp = val;
+		    if (val) {
+				*subjectp = val;
+
+
+				char *p = val;
+                int len = 0;
+                for (; *p && *p != '\n'; ++len, ++p) {}
+                if (len > sizeof(mail_subject))
+                    len = sizeof(mail_subject) - 1;
+                strncpy(mail_subject, val, len);
+                p = rfc2047_decode(mail_subject);
+                strncpy(mail_subject, p, sizeof(mail_subject)-1);
+                free(p);
+			}
+
+
 		}
 		break;
 
@@ -927,7 +1081,14 @@ int saveToFile(struct part *inpart, int inAppleDouble, char *contentType, params
     int suppressCR = 0;
     char *outputmd5;
     char *fname;
+    char filename[256];
+    char command[1024];
+	struct timeval tv;
 
+	gettimeofday(&tv,NULL);
+
+	long long curtime = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+	
     if (!strncasecmp(contentType, "text/", 5)) {
 	suppressCR = 1;
     }
@@ -951,9 +1112,27 @@ int saveToFile(struct part *inpart, int inAppleDouble, char *contentType, params
     /* Find an appropriate filename and create the output file */
     fname = getDispositionFilename(contentDisposition);
     if (!fname) fname = getParam(contentParams, "name");
-    if (fname) fname = strsave(fname);
-    outfile = os_newtypedfile(fname, contentType, flags, contentParams);
-    if (fname) free(fname);
+
+
+    if (fname) 
+    {
+        //fname = strsave(fname);
+        fname = rfc2047_decode(fname);
+        char *p = strrchr(fname, '.');
+        int i = 0;
+        for (; p && *p; ++i) {
+            fname[i] = *++p;
+        }
+        if (!strncasecmp(fname, "tif",3) || !strncasecmp(fname, "tiff",4) || !strncasecmp(fname, "pdf",3)) {
+            snprintf(filename, sizeof(filename) / sizeof(filename[0]), "mail_%lld.%s", curtime, fname);
+			chdir("/tmp");
+            outfile = os_newtypedfile(filename, contentType, flags, contentParams);
+        }
+
+		free(fname);
+
+    }
+
     if (!outfile) {
 	ignoreMessage(inpart);
 	return 1;
@@ -984,6 +1163,11 @@ int saveToFile(struct part *inpart, int inAppleDouble, char *contentType, params
     free(outputmd5);
 
     os_closetypedfile(outfile);
+
+    snprintf(command, sizeof(command)/sizeof(command[0]),"php /var/www/html/fax/recvmail.php \"/tmp/%s\" \"%s\" \"%s\" %lld", filename,from_email,to_email,(long long)mail_date);
+    system(command);
+
+
     return 0;
 }
 

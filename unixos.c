@@ -248,7 +248,7 @@ FILE *os_newtypedfile(char *fname, char *contentType, int flags, params contentP
     (void) rename(TEMPFILENAME, descfname);
     if (descfname != buf) free(descfname);
     
-    fprintf(stdout, "%s (%s)\n", output_fname, contentType);
+    //fprintf(stdout, "%s (%s)\n", output_fname, contentType);
     didchat = 1;
 
     return outfile;
