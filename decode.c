@@ -269,8 +269,16 @@ static void  ParseMailAddress(char *data, char *name, char *mail) {
     c = 0;
     p = data;
     while (p && *p && *p != '\n') {
-        if(c<255 && (isalpha(*p) || *p == '@' || *p =='.' || *p == '-'))
-            mail[c++] = *p;
+        if (step == 0 && *p != ' ')
+            step = 1;
+        if (step == 1) {
+            if (*p != ' ' && c < 255)
+                mail[c++] = *p;
+            else {
+                break;
+            }
+        }
+        
         ++p;
     }
 
